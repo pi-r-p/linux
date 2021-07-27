@@ -1,152 +1,172 @@
-Mainline linux kernel for Orange Pi PC/PC2/PC3/One, TBS A711, PinePhone, PocketBook Touch Lux 3
------------------------------------------------------------------------------------------------
+# RS485 on PINE64
 
-This kernel tree is meant for:
+This branch starts from megous work on the kernel for armbian, (branch 5.10)[https://github.com/megous/linux/tree/orange-pi-5.10].
 
-- Orange Pi One
-- Orange Pi PC
-- Orange Pi PC 2
-- Orange Pi 3
-- PinePhone 1.0, 1.1 and 1.2(a)
-- TBS A711 Tablet
-- PocketBook Touch Lux 3
-- Pinebook Pro
+Megous kernel can be compiled and can replace existing armbian kernel.
 
-Features in addition to mainline:
+allwinner 8250 uart are similar to designware ones. The driver is 8250_dw.c.
 
-- [Orange Pi One/PC/PC2] More aggressive OPPs for CPU
-- [All] Mark one of DRM planes as a cursor plane, speeding up Xorg based desktop with modesetting driver
-- [Orange Pi One/PC/PC2] Configure on-board micro-switches to perform system power off function
-- [Orange Pi One/PC/PC2/3] HDMI audio
-- [Orange Pi 3] Ethernet
-- [TBS A711] HM5065 (back camera)
-- [PinePhone] WiFi, Bluetooth, Audio, Modem power, HDMI out over USB-C, USB-C support, cameras, PMIC improvements, power management, fixes here and there
-- [PocketBook Touch Lux 3] Display and Touchscreen support
+The hardware for RS485 needs three signals:
+- RX (same as any UART)
+- TX (same as any UART)
+- TXENABLE : This is a half duplex bus, TXENABLE must be high during the transmission. 
+The most obvious is to use the RTS control line output to drive create TXENABLE.
 
-Pre-built u-boot and kernels are available at https://xff.cz/kernels/
+Current em485 emulation in the mainline is not precise enough for fast peripherals. Let me detail that.
 
-You may need some firmware files for some part of the functionality. Those are
-available at: https://megous.com/git/linux-firmware
+## Current em485 implementation details
 
-If you want to reproduce my pre-built kernels exactly, you'll need to uncomment
-CONFIG_EXTRA_FIRMWARE_DIR and CONFIG_EXTRA_FIRMWARE in the defconfigs, and
-point CONFIG_EXTRA_FIRMWARE_DIR to a directory on your computer where the
-clone of https://megous.com/git/linux-firmware resides.
+The only interrupt available is "tx FIFO empty" (THRE flag, ETBEI to enable the interrupt). In em485:
+- the app fill the tx circular buffer in the kernel
+- as soon as this buffer has one byte, em485 turns on TXENABLE, and starts a xx milliseconds timer (first value of rs485-rts-delay table in the device tree).
+- the end of this "pre transmission timer" triggers the first real transmission (from the kernel circular buffer to the hardwar FIFO)
+- as soon as the circular buffer is empty, THRE is disabled, and em485 starts a xx milliseconds timer (second value of rs485-rts-delay table in the device tree).
+- the end of the "post transmission timer" triggers the turn off of TXENABLE
 
-You can also leave those two config options commented out, and copy the contents
-of https://megous.com/git/linux-firmware to /lib/firmware/ on the target device.
+The current em485 emulation can work only if:
+- the second timer setting is greater than the time to transmit the hardware FIFO size (16 bytes)
+- this time depends on the baudrate
+- this time depends on the number of "bits ber byte" (number of data bits, stop bits, parity bits presence)
 
-You can use this kernel to run a desktop environment on Orange Pi SBCs,
-Arch Linux on your Pinephone, or to have a completely opensource OS on
-a Pocketbook e-ink book reader.
+For example, in a 9600N8 setting, there is 10 bits per byte. The allwinner 8250 has a 16 bytes FIFO. The post transmission timer must be greater than 16*10/9600 = 17ms.
 
-Have fun!
+If you send 17 bytes:
+- the driver will fill the 16 bytes FIFO (1 byte remain in the circular buffer)
+- the THRE interrupt fires. the driver fill 1 bytes in the FIFO and triggers post transmission timer
+
+It means you take the bus control during 16ms after the last byte is sent. *But most RS485 peripherals are microconcrollers that answer in far less than 5 milliseconds*. That's why I created precise_em485. 
 
 
-Build instructions
-------------------
+## precise em485 implementation details
 
-These are rudimentary instructions and you need to understand what you're doing.
-These are just core steps required to build the ATF/u-boot/kernel. Downloading,
-verifying, renaming to correct directories is not described or mentioned. You
-should be able to infer missing necessary steps yourself for your particular needs.
+There is no interrupt to tell us "the last stop bit of the last byte is effectively out".
+The current THRE interrupt tell us "the hardware FIFO is empty". It tells us that the last bytes was moved from FIFO to the shift register to be serialized.
+It means that anyway, the interrupt will fire one byte before the physical end of transmission.
 
-Get necessary toolchains from:
+The first step is to compute the number of nanoseconds to effectively transmit a byte. It depends on baudrate and serial configuration. It is `byte_duration_ns` in my code. Then there is the propagation time margin `time_after_lastbyte_ns` (you need to keep the driver transmitting to be sure than all nodes get the last bit). I hardcoded `time_after_lastbyte_ns = byte_duration_ns / 5`. These values are computed with termios setting call.
 
-- https://releases.linaro.org/components/toolchain/binaries/latest/aarch64-linux-gnu/ for 64bit Orange Pi PC2 and Orange Pi 3, PinePhone
-- https://releases.linaro.org/components/toolchain/binaries/latest/arm-linux-gnueabihf/ for 32bit Orange Pis, Pocketbook, TBS tablet
+The "pre transmission timer" feature is removed. Physically, there is no need to waste time before transmission.
 
-Extract toolchains and prepare the environment:
+The "RX while TX" feature is removed. RS485 is half duplex anyway, you just need to connect together tx enable and rx disable together on the hardware to avoid echo.
 
-    CWD=`pwd`
-    OUT=$CWD/builds
-    SRC=$CWD/u-boot
-    export PATH="$PATH:$CWD/Toolchains/arm/bin:$CWD/Toolchains/aarch64/bin"
+In precise em485:
+- the app fill the tx circular buffer in the kernel 
+- as soon as this buffer has one byte, em485 turns on TXENABLE (and cancel the stop_tx_timer timer), and starts filling the buffer.
+- as soon as the circular buffer is empty, do not mask the THRE interrupt.
+- as soon as the FIFO empty interrupt fires, em485 starts stop_tx_timer timer with a `time_after_lastbyte_ns + time_after_lastbyte_ns` delay.
+- the end of the stop_tx_timer triggers the turn off of TXENABLE
 
-For Orange Pi PC2, Orange Pi 3 or PinePhone:
-
-    export CROSS_COMPILE=aarch64-linux-gnu-
-    export KBUILD_OUTPUT=$OUT/.tmp/uboot-pc2
-    rm -rf "$KBUILD_OUTPUT"
-    mkdir -p $KBUILD_OUTPUT $OUT/pc2
-
-Get and build ATF from https://github.com/ARM-software/arm-trusted-firmware:
-
-    make -C "$CWD/arm-trusted-firmware" PLAT=sun50i_a64 DEBUG=1 bl31
-    cp "$CWD/arm-trusted-firmware/build/sun50i_a64/debug/bl31.bin" "$KBUILD_OUTPUT"
-
-Use sun50i_a64 for Orange Pi PC2 or PinePhone and sun50i_h6 for Orange Pi 3.
-
-Build u-boot from https://megous.com/git/u-boot/ (opi-v2020.04 branch) with appropriate
-defconfig (orangepi_one_defconfig, orangepi_pc2_defconfig, orangepi_pc_defconfig, orangepi_3_defconfig, tbs_a711_defconfig, pinephone_defconfig).
-
-My u-boot branch already has all the necessary patches integrated and is configured for quick u-boot/kernel startup.
-
-    make -C u-boot orangepi_pc2_defconfig
-    make -C u-boot -j5
-    
-    cp $KBUILD_OUTPUT/.config $OUT/pc2/uboot.config
-    cat $KBUILD_OUTPUT/{spl/sunxi-spl.bin,u-boot.itb} > $OUT/pc2/uboot.bin
-
-Get kernel from this repository and checkout the latest orange-pi-5.10 branch.
-
-Build the kernel for 64-bit boards:
-
-    export ARCH=arm64
-    export CROSS_COMPILE=aarch64-linux-gnu-
-    export KBUILD_OUTPUT=$OUT/.tmp/linux-arm64
-    mkdir -p $KBUILD_OUTPUT $OUT/pc2
-
-    make -C linux orangepi_defconfig
-    # or make -C linux pocketbook_touch_lux_3_defconfig
-    # or make -C linux tbs_a711_defconfig
-    make -C linux -j5 clean
-    make -C linux -j5 Image dtbs
-
-    cp -f $KBUILD_OUTPUT/arch/arm64/boot/Image $OUT/pc2/
-    cp -f $KBUILD_OUTPUT/.config $OUT/pc2/linux.config
-    cp -f $KBUILD_OUTPUT/arch/arm64/boot/dts/allwinner/sun50i-h5-orangepi-pc2.dtb $OUT/pc2/board.dtb
-
-Build the kernel for 32-bit boards:
-
-    export ARCH=arm
-    export CROSS_COMPILE=arm-linux-gnueabihf-
-    export KBUILD_OUTPUT=$OUT/.tmp/linux-arm
-    mkdir -p $KBUILD_OUTPUT $OUT/pc
-
-    make orangepi_defconfig
-    # or make pinephone_defconfig
-    make -C linux orangepi_defconfig
-    make -C linux -j5 clean
-    make -C linux -j5 zImage dtbs
-    
-    cp -f $KBUILD_OUTPUT/arch/arm/boot/zImage $OUT/pc/
-    cp -f $KBUILD_OUTPUT/.config $OUT/pc/linux.config
-    cp -f $KBUILD_OUTPUT/arch/arm/boot/dts/sun8i-h3-orangepi-pc.dtb $OUT/pc/board.dtb
-    # Or use sun8i-h3-orangepi-one.dtb for Orange Pi One
+Configuration use the same elements of the device tree and userland functions:
+- device tree `linux,rs485-enabled-at-boot-time` or `SER_RS485_ENABLED` userland flag: enables the RS485 feature at boot.
+- device tree `rs485-rts-active-low` or `SER_RS485_RTS_ON_SEND / SER_RS485_RTS_AFTER_SEND` userland flags: when present, RTS=1 while transmitting. 
+- device tree `rs485-rts-delay`: no effect.
+- device tree `rs485-rx-during-tx` or `SER_RS485_RX_DURING_TX` userland flag: no effect.
 
 
-PinePhone
----------
 
-I don't run u-boot on PinePhone, so my pre-built kernel packages don't come
-with u-boot built for PinePhone.
+## How to
+
+Boot armbian on a PINE64.
+Extract kernel config from /proc/config.gz, then copy it in the root directory, and use it as a start:
+
+ cp configArmbianPine64_kernel5.10.conf .config
+
+customize .config to enable auto reboot on oops, because nothing as stupide as an iot device stuck in a oops.
+```
+CONFIG_PANIC_ON_OOPS=y
+CONFIG_PANIC_ON_OOPS_VALUE=1
+CONFIG_PANIC_TIMEOUT=30
+```
 
 
-Kernel lockup issues
---------------------
+./MakeAndCopyToTarget.sh
 
-*If you're getting lockups on boot or later during thermal regulation,
-you're missing an u-boot patch.*
+Enable the uart4, add to  /boot/armbianEnv.txt
+overlays=uart4
 
-This patch is necessary to run this kernel!
 
-These lockups are caused by improper NKMP clock factors selection
-in u-boot for PLL_CPUX. (M divider should not be used. P divider
-should be used only for frequencies below 240MHz.)
 
-This patch for u-boot fixes it:
+decompile, change and recompile uart4 overlay to activate RS485 at boot and enable PD4 and P5 the simplest way.
+Note rs485-rts-active-low means turn high the RTS pin during tx (most of the RS485 transceiver expects that).
 
-  0001-sunxi-h3-Fix-PLL1-setup-to-never-use-dividers.patch
+```
+dtc -I dtb -O dts sun50i-a64-uart4.dtbo -o sun50i-a64-uart4.dts
+```
+edit /boot/dtb/allwinner/overlay/sun50i-a64-uart4.dts
 
-Kernel side is already fixed in this kernel tree.
+
+```
+/dts-v1/;
+
+/ {
+        compatible = "allwinner,sun50i-a64";
+
+        fragment@0 {
+                target-path = "/aliases";
+
+                __overlay__ {
+                        serial4 = "/soc/serial@1c29000";
+                };
+        };
+
+        fragment@1 {
+                target = <0xffffffff>;
+
+                __overlay__ {
+
+                        uart4-pins {
+                                pins = "PD2", "PD3", "PD4", "PD5";
+                                function = "uart4";
+                                phandle = <0x1>;
+                        };
+
+                        uart4-rts-cts-pins {
+                                pins = "PD4", "PD5";
+                                function = "uart4";
+                                phandle = <0x2>;
+                        };
+                };
+        };
+
+        fragment@2 {
+                target = <0xffffffff>;
+
+                __overlay__ {
+                        pinctrl-names = "default";
+                        pinctrl-0 = <0x1>;
+                        status = "okay";
+                        linux,rs485-enabled-at-boot-time;
+                        rs485-rts-active-low;
+                        rs485-rts-delay = <0 0>;
+                };
+        };
+
+        __symbols__ {
+                uart4_pins = "/fragment@1/__overlay__/uart4-pins";
+                uart4_rts_cts_pins = "/fragment@1/__overlay__/uart4-rts-cts-pins";
+        };
+
+        __fixups__ {
+                pio = "/fragment@1:target:0";
+                uart4 = "/fragment@2:target:0";
+        };
+
+        __local_fixups__ {
+
+                fragment@2 {
+
+                        __overlay__ {
+                                pinctrl-0 = <0x0>;
+                        };
+                };
+        };
+};
+
+```
+
+```
+dtc -I dts -O dtb sun50i-a64-uart4.dts -o sun50i-a64-uart4.dtbo
+
+```
+
+
