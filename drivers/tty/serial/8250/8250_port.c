@@ -1811,10 +1811,18 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 		return;
 	}
 	if (uart_circ_empty(xmit)) {
+		if (up->precise_em485) {
+			/* end tx after the last byte goes away from shift register*/
+			up->precise_em485->start_stop_tx_timer(up, 1);
+		}
 		__stop_tx(up);
 		return;
 	}
-
+	/* precise RS485 emulation : start transmission mode before 1rst out */
+	if (up->precise_em485) {
+		up->rs485_start_tx(up);
+		hrtimer_cancel(&up->precise_em485->stop_tx_timer);
+	}
 	count = up->tx_loadsz;
 	do {
 		serial_out(up, UART_TX, xmit->buf[xmit->tail]);
@@ -1838,8 +1846,11 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 	 * With RPM enabled, we have to wait until the FIFO is empty before the
 	 * HW can go idle. So we get here once again with empty FIFO and disable
 	 * the interrupt and RPM in __stop_tx()
+	 * Same goes for precise rs485 emulation : we need the last interrupt one
+	 * byte before the end of the transmission to schedule the rx mode again
 	 */
-	if (uart_circ_empty(xmit) && !(up->capabilities & UART_CAP_RPM))
+	if (uart_circ_empty(xmit) && !(up->capabilities & UART_CAP_RPM) && 
+	    !(up->precise_em485))
 		__stop_tx(up);
 }
 EXPORT_SYMBOL_GPL(serial8250_tx_chars);
@@ -2621,7 +2632,7 @@ static void serial8250_set_divisor(struct uart_port *port, unsigned int baud,
 		serial8250_do_set_divisor(port, baud, quot, quot_frac);
 }
 
-static unsigned int serial8250_get_baud_rate(struct uart_port *port,
+unsigned int serial8250_get_baud_rate(struct uart_port *port,
 					     struct ktermios *termios,
 					     struct ktermios *old)
 {
@@ -2637,6 +2648,7 @@ static unsigned int serial8250_get_baud_rate(struct uart_port *port,
 				  port->uartclk / 16 / UART_DIV_MAX,
 				  (port->uartclk + tolerance) / 16);
 }
+EXPORT_SYMBOL_GPL(serial8250_get_baud_rate);
 
 /*
  * Note in order to avoid the tty port mutex deadlock don't use the next method

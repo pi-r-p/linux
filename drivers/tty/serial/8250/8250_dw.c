@@ -331,8 +331,9 @@ static void dw8250_set_termios(struct uart_port *p, struct ktermios *termios,
 {
 	unsigned long newrate = tty_termios_baud_rate(termios) * 16;
 	struct dw8250_data *d = to_dw8250_data(p->private_data);
-	long rate;
-	int ret;
+	long rate, bits;
+	int ret, baud;
+	struct uart_8250_port *up = up_to_u8250p(p);
 
 	clk_disable_unprepare(d->clk);
 	rate = clk_round_rate(d->clk, newrate);
@@ -355,6 +356,38 @@ static void dw8250_set_termios(struct uart_port *p, struct ktermios *termios,
 		p->status |= UPSTAT_AUTOCTS;
 
 	serial8250_do_set_termios(p, termios, old);
+
+	if (up->precise_em485) {
+		// compute byte duration, up to baudrate and number of bits to send
+		baud = serial8250_get_baud_rate(p, termios, old);
+
+		switch (termios->c_cflag & CSIZE) {
+		case CS5:
+			bits = 7;
+			break;
+		case CS6:
+			bits = 8;
+			break;
+		case CS7:
+			bits = 9;
+			break;
+		default:
+			bits = 10;
+			break; /* CS8 */
+		}
+
+		if (termios->c_cflag & CSTOPB)
+			bits++;
+		if (termios->c_cflag & PARENB)
+			bits++;
+
+		up->precise_em485->byte_duration_ns = (bits * 1000000000)/baud;
+		// add 20% to the byte duration
+		up->precise_em485->time_after_lastbyte_ns = up->precise_em485->byte_duration_ns / 5;
+		printk("PPD: values for precise RS485 emulation on %s: baudrate %d, byte duration %ld ns, timeafterlastbyte %ld ns , bits=%ld", p->name, baud, \
+				up->precise_em485->byte_duration_ns,up->precise_em485->time_after_lastbyte_ns,bits);
+	}
+
 }
 
 static void dw8250_set_ldisc(struct uart_port *p, struct ktermios *termios)
@@ -435,6 +468,93 @@ static void dw8250_quirks(struct uart_port *p, struct dw8250_data *data)
 	}
 }
 
+
+
+
+// timer callback to reenable rx one byte after putting the RS485 in receive mode again.
+static enum hrtimer_restart dw8250_precise_em485_handle_stop_tx( struct hrtimer *t)
+{
+	struct precise_8250_em485 *precise_em485;
+	struct uart_8250_port *p;
+	unsigned long flags;
+	precise_em485 = container_of(t, struct precise_8250_em485, stop_tx_timer);
+	p = precise_em485->port;
+	spin_lock_irqsave(&p->port.lock, flags);
+	p->rs485_stop_tx(p);
+	spin_unlock_irqrestore(&p->port.lock, flags);
+    return HRTIMER_NORESTART;
+}
+
+void dw8250_precise_em485_receivemode_timer_start(struct uart_8250_port *up, int nchar)
+{
+	ktime_t ktime;
+	hrtimer_cancel(&up->precise_em485->stop_tx_timer); //cancel if already on
+	ktime = ktime_set( 0, nchar * up->precise_em485->byte_duration_ns+ up->precise_em485->time_after_lastbyte_ns);
+	hrtimer_start(&up->precise_em485->stop_tx_timer, ktime, HRTIMER_MODE_REL ); //program the callback to now + ktime
+}
+
+static int dw8250_precise_em485_init(struct uart_8250_port *p)
+{
+	// do not re use em485, too much side effects everywhere. precise rs485 emulation has not the same behavior.
+
+	if (p->precise_em485)
+		return 0;
+
+	p->precise_em485 = kmalloc(sizeof(struct precise_8250_em485), GFP_ATOMIC);
+	if (!p->precise_em485)
+		return -ENOMEM;
+
+	hrtimer_init(&p->precise_em485->stop_tx_timer, CLOCK_MONOTONIC,
+		     HRTIMER_MODE_REL);
+
+	p->precise_em485->stop_tx_timer.function = &dw8250_precise_em485_handle_stop_tx;
+	p->precise_em485->port = p;
+	p->precise_em485->byte_duration_ns = 0; // this depends on baudrate
+	p->precise_em485->time_after_lastbyte_ns = 0; // this depends on baudrate
+	p->precise_em485->start_stop_tx_timer = &dw8250_precise_em485_receivemode_timer_start;
+	// initialize transceiver in receive mode
+	p->rs485_stop_tx(p);
+
+	return 0;
+}
+
+
+int dw8250_precise_em485_config(struct uart_port *port, struct serial_rs485 *rs485)
+{
+	struct uart_8250_port *up = up_to_u8250p(port);
+
+	/* pick sane settings if the user hasn't */
+	if (!!(rs485->flags & SER_RS485_RTS_ON_SEND) ==
+	    !!(rs485->flags & SER_RS485_RTS_AFTER_SEND)) {
+		rs485->flags |= SER_RS485_RTS_ON_SEND;
+		rs485->flags &= ~SER_RS485_RTS_AFTER_SEND;
+	}
+
+	memset(rs485->padding, 0, sizeof(rs485->padding));
+	port->rs485 = *rs485;
+
+	gpiod_set_value(port->rs485_term_gpio,
+			rs485->flags & SER_RS485_TERMINATE_BUS);
+
+	/*
+	 * Both serial8250_em485_init() and serial8250_em485_destroy()
+	 * are idempotent.
+	 */
+	if (rs485->flags & SER_RS485_ENABLED) {
+		int ret = dw8250_precise_em485_init(up);
+
+		if (ret) {
+			rs485->flags &= ~SER_RS485_ENABLED;
+			port->rs485.flags &= ~SER_RS485_ENABLED;
+		}
+		printk("PPD: serial8250_em485_config done for %s", up->port.name);
+		return ret;
+	}
+
+	serial8250_em485_destroy(up);
+	return 0;
+}
+
 static int dw8250_probe(struct platform_device *pdev)
 {
 	struct uart_8250_port uart = {}, *up = &uart;
@@ -468,6 +588,10 @@ static int dw8250_probe(struct platform_device *pdev)
 	p->serial_out	= dw8250_serial_out;
 	p->set_ldisc	= dw8250_set_ldisc;
 	p->set_termios	= dw8250_set_termios;
+
+	up->port.rs485_config = dw8250_precise_em485_config; // personnal rs485 emulation
+	up->rs485_start_tx = serial8250_em485_start_tx; // this can be reused (but keep rx while tx overlay config... RS485 is half duplex)
+	up->rs485_stop_tx = serial8250_em485_stop_tx; // this can be reused (but keep rx while tx overlay config... RS485 is half duplex)
 
 	p->membase = devm_ioremap(dev, regs->start, resource_size(regs));
 	if (!p->membase)

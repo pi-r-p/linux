@@ -85,6 +85,20 @@ struct uart_8250_em485 {
 };
 
 /*
+ * Precise RS485 emulation do not have timer before send, and automatically configures
+ * timers for faster tx to rx transitions.
+ */
+struct precise_8250_em485 {
+	struct hrtimer		stop_tx_timer;      /* "rs485 stop tx" timer */
+	struct uart_8250_port	*port;          /* for hrtimer callbacks */
+	/* function to program tx stop after nchar characters */
+	void 				(*start_stop_tx_timer) (struct uart_8250_port *up, int nchar); 
+	unsigned long       byte_duration_ns;	/* depends on the baudrate */
+	/* depends on the baudrate, should be byte_duration +20% */
+	unsigned long       time_after_lastbyte_ns;	
+};
+
+/*
  * This should be used by drivers which want to register
  * their own 8250 ports without registering their own
  * platform device.  Using these will make your driver
@@ -133,6 +147,7 @@ struct uart_8250_port {
 	void			(*dl_write)(struct uart_8250_port *, int);
 
 	struct uart_8250_em485 *em485;
+	struct precise_8250_em485 *precise_em485;
 	void			(*rs485_start_tx)(struct uart_8250_port *);
 	void			(*rs485_stop_tx)(struct uart_8250_port *);
 
