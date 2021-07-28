@@ -1,0 +1,67 @@
+/dts-v1/;
+
+/ {
+        compatible = "allwinner,sun50i-a64";
+
+        fragment@0 {
+                target-path = "/aliases";
+
+                __overlay__ {
+                        serial4 = "/soc/serial@1c29000";
+                };
+        };
+
+        fragment@1 {
+                target = <0xffffffff>;
+
+                __overlay__ {
+
+                        uart4-pins {
+                                pins = "PD2", "PD3", "PD4", "PD5";
+                                function = "uart4";
+                                phandle = <0x1>;
+                        };
+
+                        uart4-rts-cts-pins {
+                                pins = "PD4", "PD5";
+                                function = "uart4";
+                                phandle = <0x2>;
+                        };
+                };
+        };
+
+        fragment@2 {
+                target = <0xffffffff>;
+
+                __overlay__ {
+                        pinctrl-names = "default";
+                        pinctrl-0 = <0x1>;
+                        status = "okay";
+                        linux,rs485-enabled-at-boot-time;
+			rs485-rts-active-low;
+                        rs485-rx-during-tx;
+                        rs485-rts-delay = <0 1>;
+                };
+        };
+
+        __symbols__ {
+                uart4_pins = "/fragment@1/__overlay__/uart4-pins";
+                uart4_rts_cts_pins = "/fragment@1/__overlay__/uart4-rts-cts-pins";
+        };
+
+        __fixups__ {
+                pio = "/fragment@1:target:0";
+                uart4 = "/fragment@2:target:0";
+        };
+
+        __local_fixups__ {
+
+                fragment@2 {
+
+                        __overlay__ {
+                                pinctrl-0 = <0x0>;
+                        };
+                };
+        };
+};
+
