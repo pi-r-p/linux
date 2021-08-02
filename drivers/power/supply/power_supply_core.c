@@ -587,6 +587,7 @@ int power_supply_get_battery_info(struct power_supply *psy,
 	info->temp_max                       = INT_MAX;
 	info->factory_internal_resistance_uohm  = -EINVAL;
 	info->resist_table = NULL;
+	info->disableTemperatureSensor 			 = false;
 
 	for (index = 0; index < POWER_SUPPLY_OCV_TEMP_MAX; index++) {
 		info->ocv_table[index]       = NULL;
@@ -655,8 +656,9 @@ int power_supply_get_battery_info(struct power_supply *psy,
 				   1, &info->temp_alert_max);
 	of_property_read_u32_index(battery_np, "operating-range-celsius",
 				   0, &info->temp_min);
-	of_property_read_u32_index(battery_np, "operating-range-celsius",
-				   1, &info->temp_max);
+
+	info->disableTemperatureSensor = of_property_read_bool(battery_np,
+			"disable-temperature-sensor");
 
 	len = of_property_count_u32_elems(battery_np, "ocv-capacity-celsius");
 	if (len < 0 && len != -EINVAL) {

@@ -787,6 +787,10 @@ static const struct mfd_cell axp803_cells[] = {
 		.of_compatible	= "x-powers,axp813-usb-power-supply",
 	},
 	{	.name		= "axp20x-regulator" },
+	{
+		.name		= "axp20x-charger-led",
+		.of_compatible	= "x-powers,axp813-charger-led",
+	}
 };
 
 static const struct mfd_cell axp806_self_working_cells[] = {

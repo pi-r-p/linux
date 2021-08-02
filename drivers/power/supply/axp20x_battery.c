@@ -56,6 +56,8 @@
 
 #define AXP20X_V_OFF_MASK		GENMASK(2, 0)
 
+#define AXP20X_ADC_RATE_TS_PIN_FUNC BIT(2)
+
 #define DRVNAME "axp20x-battery-power-supply"
 
 struct axp20x_batt_ps;
@@ -807,6 +809,15 @@ static int axp20x_power_probe(struct platform_device *pdev)
 	 */
 	axp20x_get_constant_charge_current(axp20x_batt,
 					   &axp20x_batt->max_ccc);
+
+	if (info->disableTemperatureSensor) {
+		/* from datasheet : TS pin is now an External input for ADC 
+		 * and do not affect the charger 
+		 */
+		regmap_update_bits(axp20x_batt->regmap, AXP20X_ADC_RATE, 
+							 AXP20X_ADC_RATE_TS_PIN_FUNC, AXP20X_ADC_RATE_TS_PIN_FUNC);
+		printk("AXP20x: thermal battery regulation deactivated");
+	}
 
 	if (of_machine_is_compatible("pine64,pinephone-1.2") > 0 ||
 		of_machine_is_compatible("pine64,pinephone-1.1") > 0 ||
