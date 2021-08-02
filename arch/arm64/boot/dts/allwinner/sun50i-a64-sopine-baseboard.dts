@@ -191,8 +191,11 @@
 /* On Euler connector, RTS/CTS optional */
 &uart4 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&uart4_pins>;
-	status = "disabled";
+	pinctrl-0 = <&uart4_pins &uart4_rts_cts_pins>;
+	status = "okay";
+	linux,rs485-enabled-at-boot-time;
+	rs485-rts-active-low;
+	rs485-rx-during-tx;
 };
 
 &usb_otg {

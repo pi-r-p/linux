@@ -2,8 +2,8 @@
 VERSION = 5
 PATCHLEVEL = 10
 SUBLEVEL = 19
-EXTRAVERSION =
-NAME = Dare mighty things
+EXTRAVERSION = -rs485
+NAME = all night work
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"

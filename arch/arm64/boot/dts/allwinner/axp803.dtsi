@@ -152,4 +152,16 @@
 			     "x-powers,axp813-usb-power-supply";
 		status = "disabled";
 	};
+
+	charger_led: charger-led {
+		compatible = "x-powers,axp813-charger-led";
+		status = "okay";
+	};
+
+	pek:pek {
+		compatible = "x-powers,axp20x-pek";
+		status = "okay";
+		time =<128>;
+	};
+
 };
