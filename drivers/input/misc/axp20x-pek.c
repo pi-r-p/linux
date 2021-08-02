@@ -215,13 +215,13 @@ static irqreturn_t axp20x_pek_irq(int irq, void *pwr)
 	 * The power-button is connected to ground so a falling edge (dbf)
 	 * means it is pressed.
 	 */
-	if (irq == axp20x_pek->irq_dbf)
+/*	if (irq == axp20x_pek->irq_dbf)
 		input_report_key(idev, KEY_POWER, true);
 	else if (irq == axp20x_pek->irq_dbr)
 		input_report_key(idev, KEY_POWER, false);
 
-	input_sync(idev);
-
+	input_sync(idev);*/
+	//printk("PPD: pek irq handle");
 	return IRQ_HANDLED;
 }
 
@@ -350,6 +350,8 @@ static int axp20x_pek_probe(struct platform_device *pdev)
 	device_init_wakeup(&pdev->dev, true);
 
 	platform_set_drvdata(pdev, axp20x_pek);
+	printk("PPD pek force startup to 128ms");
+	axp20x_store_attr(&pdev->dev, startup_time, AXP20X_PEK_STARTUP_MASK, "128", 4);
 
 	return 0;
 }
