@@ -112,11 +112,6 @@
 #define SUN6I_YEAR_OFF				(SUN6I_YEAR_MIN - 1900)
 
 /*
- * usefull to unlock LOSC
- */
-#define LOSC_OUT_GATING_REG 0x0060
-
-/*
  * There are other differences between models, including:
  *
  *   - number of GPIO pins that can be configured to hold a certain level
