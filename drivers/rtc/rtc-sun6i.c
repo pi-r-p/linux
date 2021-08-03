@@ -112,6 +112,11 @@
 #define SUN6I_YEAR_OFF				(SUN6I_YEAR_MIN - 1900)
 
 /*
+ * usefull to unlock LOSC
+ */
+#define LOSC_OUT_GATING_REG 0x0060
+
+/*
  * There are other differences between models, including:
  *
  *   - number of GPIO pins that can be configured to hold a certain level
@@ -150,6 +155,13 @@ struct sun6i_rtc_dev {
 };
 
 static struct sun6i_rtc_dev *sun6i_rtc;
+static int sun6i_rtc_errorCount = 0; /* global error counter. ugly too.*/
+/*
+ * After SUN6I_RTC_MAX_BUSY_ERRORS, consider one of the three
+ * LOSC ACCE bits is frozen to 1. There is nothing to do, hardware bug.
+ */
+#define SUN6I_RTC_MAX_BUSY_ERRORS 20
+static u32 sun6i_rtc_frozenLOSCMask = 0; /* ugly too.*/
 
 static unsigned long sun6i_rtc_osc_recalc_rate(struct clk_hw *hw,
 					       unsigned long parent_rate)
@@ -556,13 +568,22 @@ static int sun6i_rtc_wait(struct sun6i_rtc_dev *chip, int offset,
 
 	do {
 		reg = readl(chip->base + offset);
+		reg &= (~sun6i_rtc_frozenLOSCMask);
 		reg &= mask;
 
 		if (!reg)
 			return 0;
 
 	} while (time_before(jiffies, timeout));
-
+	sun6i_rtc_errorCount++;
+	if (sun6i_rtc_errorCount >= SUN6I_RTC_MAX_BUSY_ERRORS) {
+		sun6i_rtc_frozenLOSCMask|=reg;
+		printk("PPD: RTC reached %d busy errors. Weaken the busy check with mask %x and reset RTC",
+				sun6i_rtc_errorCount, sun6i_rtc_frozenLOSCMask);
+		writel(0x101, chip->base + SUN6I_RTC_YMD); // 1 january 1970
+		writel(1, chip->base + SUN6I_RTC_HMS); // 00h00:01
+		sun6i_rtc_errorCount = 0;
+	}
 	return -ETIMEDOUT;
 }
 
